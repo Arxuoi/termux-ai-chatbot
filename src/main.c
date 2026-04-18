@@ -87,10 +87,9 @@ int main(int argc, char **argv) {
     signal(SIGTERM, signal_handler);
     signal(SIGPIPE, SIG_IGN);
     
-    // Initialize SSL
-    SSL_library_init();
-    SSL_load_error_strings();
-    OpenSSL_add_all_algorithms();
+    // Initialize SSL (OpenSSL 1.1+ compatible)
+    OPENSSL_init_ssl(0, NULL);
+    OPENSSL_init_crypto(0, NULL);
     
     // Start server
     int server_fd = server_init(g_config.port);
