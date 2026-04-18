@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS = -Wall -O3 -pthread -Iinclude
-LDFLAGS = -lssl -lcrypto
+LDFLAGS =
 
 TARGET = chatbot
 SOURCES = src/main.c src/server.c src/openrouter.c src/utils.c src/web_handler.c
