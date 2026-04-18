@@ -1,0 +1,8 @@
+.env
+*.o
+*.out
+build/
+chatbot
+.env.backup
+*.log
+.DS_Store
