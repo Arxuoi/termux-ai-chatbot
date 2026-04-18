@@ -2,7 +2,7 @@
 #define CONFIG_H
 
 #define MAX_BUFFER 65536
-#define MAX_HEADERS 4096
+#define MAX_HEADERS 8192
 #define MAX_BODY 32768
 #define DEFAULT_PORT 5000
 #define MAX_ENV_LINE 512
