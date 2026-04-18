@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Termux AI Chatbot</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app">
+        <header class="header">
+            <h1>🤖 Termux AI</h1>
+            <div class="status">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Connected</span>
+                <select id="modelSelect" class="model-select">
+                    <option value="openai/gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                    <option value="openai/gpt-4">GPT-4</option>
+                    <option value="anthropic/claude-3-haiku">Claude 3 Haiku</option>
+                    <option value="google/gemini-pro">Gemini Pro</option>
+                </select>
+            </div>
+        </header>
+
+        <main class="chat-container" id="chatContainer">
+            <div class="message bot">
+                <div class="message-content">
+                    Hello! I'm an AI assistant running on Termux via OpenRouter. How can I help you today?
+                </div>
+                <div class="message-time">Just now</div>
+            </div>
+        </main>
+
+        <footer class="input-container">
+            <textarea 
+                id="messageInput" 
+                placeholder="Type your message..." 
+                rows="1"
+                autofocus
+            ></textarea>
+            <button id="sendBtn" class="send-btn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                </svg>
+            </button>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
