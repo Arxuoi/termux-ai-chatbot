@@ -1,56 +1,31 @@
 #include "../include/openrouter.h"
 #include "../include/config.h"
+#include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
-SSL_CTX *init_ssl_context(void) {
-    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
-    SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
-    return ctx;
-}
-
-int https_post_json(const char *hostname, const char *path, const char *api_key,
+int http_post_json(const char *hostname, const char *path, const char *api_key,
                     const char *json_body, char *response, size_t max_len) {
     int sock;
     struct hostent *server;
     struct sockaddr_in addr;
-    SSL_CTX *ctx;
-    SSL *ssl;
-    int result = -1;
     
-    // Resolve hostname
     server = gethostbyname(hostname);
     if (!server) return -1;
     
-    // Create socket
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return -1;
     
     addr.sin_family = AF_INET;
     memcpy(&addr.sin_addr.s_addr, server->h_addr, server->h_length);
-    addr.sin_port = htons(443);
+    addr.sin_port = htons(80);
     
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(sock);
         return -1;
     }
     
-    // Initialize SSL
-    ctx = init_ssl_context();
-    if (!ctx) {
-        close(sock);
-        return -1;
-    }
-    
-    ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, sock);
-    
-    if (SSL_connect(ssl) <= 0) {
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        close(sock);
-        return -1;
-    }
-    
-    // Build HTTP request
     char request[MAX_BUFFER];
     char auth_header[512];
     snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
@@ -69,72 +44,22 @@ int https_post_json(const char *hostname, const char *path, const char *api_key,
         path, hostname, auth_header, HTTP_REFERER, APP_TITLE, strlen(json_body), json_body
     );
     
-    // Send request
-    SSL_write(ssl, request, req_len);
+    send(sock, request, req_len, 0);
     
-    // Read response
     memset(response, 0, max_len);
-    int total_read = 0;
-    int bytes_read;
-    
-    while ((bytes_read = SSL_read(ssl, response + total_read, max_len - total_read - 1)) > 0) {
-        total_read += bytes_read;
-        if (total_read >= (int)max_len - 1) break;
+    int total = 0, bytes;
+    while ((bytes = recv(sock, response + total, max_len - total - 1, 0)) > 0) {
+        total += bytes;
+        if (total >= (int)max_len - 1) break;
     }
-    response[total_read] = '\0';
+    response[total] = '\0';
     
-    result = 0;
-    
-    // Cleanup
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    SSL_CTX_free(ctx);
     close(sock);
-    
-    return result;
-}
-
-int json_extract_content(const char *json, char *content, size_t max_len) {
-    // Find "content" field
-    const char *content_start = strstr(json, "\"content\"");
-    if (!content_start) return -1;
-    
-    content_start = strchr(content_start, ':');
-    if (!content_start) return -1;
-    content_start++;
-    
-    // Skip whitespace and quote
-    while (*content_start && (*content_start == ' ' || *content_start == '"')) content_start++;
-    
-    // Copy until closing quote
-    size_t i = 0;
-    while (*content_start && *content_start != '"' && i < max_len - 1) {
-        if (*content_start == '\\') {
-            content_start++;
-            if (*content_start == 'n') {
-                content[i++] = '\n';
-            } else if (*content_start == 't') {
-                content[i++] = '\t';
-            } else if (*content_start == 'r') {
-                content[i++] = '\r';
-            } else if (*content_start == '"') {
-                content[i++] = '"';
-            } else if (*content_start == '\\') {
-                content[i++] = '\\';
-            }
-        } else {
-            content[i++] = *content_start;
-        }
-        content_start++;
-    }
-    content[i] = '\0';
-    
-    return i;
+    return 0;
 }
 
 void json_escape(char *dest, const char *src, size_t max_len) {
     size_t i = 0, j = 0;
-    
     while (src[i] && j < max_len - 1) {
         switch (src[i]) {
             case '"': dest[j++] = '\\'; dest[j++] = '"'; break;
@@ -149,31 +74,55 @@ void json_escape(char *dest, const char *src, size_t max_len) {
     dest[j] = '\0';
 }
 
+int json_extract_content(const char *json, char *content, size_t max_len) {
+    const char *content_start = strstr(json, "\"content\"");
+    if (!content_start) return -1;
+    
+    content_start = strchr(content_start, ':');
+    if (!content_start) return -1;
+    content_start++;
+    
+    while (*content_start && (*content_start == ' ' || *content_start == '"')) content_start++;
+    
+    size_t i = 0;
+    while (*content_start && *content_start != '"' && i < max_len - 1) {
+        if (*content_start == '\\') {
+            content_start++;
+            if (*content_start == 'n') content[i++] = '\n';
+            else if (*content_start == 't') content[i++] = '\t';
+            else if (*content_start == 'r') content[i++] = '\r';
+            else if (*content_start == '"') content[i++] = '"';
+            else if (*content_start == '\\') content[i++] = '\\';
+        } else {
+            content[i++] = *content_start;
+        }
+        content_start++;
+    }
+    content[i] = '\0';
+    return i;
+}
+
 int openrouter_chat_completion(const char *api_key, const char *model,
                                const char *user_message, char *response_buffer,
                                size_t buffer_size) {
-    // Build JSON request body
     static char json_body[MAX_BUFFER];
     char escaped_message[MAX_BUFFER * 2];
     
     json_escape(escaped_message, user_message, sizeof(escaped_message));
     
-    int json_len = snprintf(json_body, sizeof(json_body),
+    snprintf(json_body, sizeof(json_body),
         "{"
         "\"model\":\"%s\","
         "\"messages\":["
         "{\"role\":\"system\",\"content\":\"You are a helpful AI assistant running on Termux.\"},"
         "{\"role\":\"user\",\"content\":\"%s\"}"
-        "],"
-        "\"temperature\":0.7,"
-        "\"max_tokens\":1024"
+        "]"
         "}",
         model, escaped_message
     );
     
-    // Make HTTPS request
     char raw_response[MAX_BUFFER * 2];
-    int result = https_post_json(
+    int result = http_post_json(
         "openrouter.ai",
         "/api/v1/chat/completions",
         api_key,
@@ -187,7 +136,6 @@ int openrouter_chat_completion(const char *api_key, const char *model,
         return -1;
     }
     
-    // Extract response body (after headers)
     char *body = strstr(raw_response, "\r\n\r\n");
     if (!body) {
         snprintf(response_buffer, buffer_size, "Error: Invalid response from API");
@@ -195,13 +143,22 @@ int openrouter_chat_completion(const char *api_key, const char *model,
     }
     body += 4;
     
-    // Check for error
     if (strstr(body, "\"error\"")) {
-        snprintf(response_buffer, buffer_size, "Error: API returned an error");
+        char *msg = strstr(body, "\"message\"");
+        if (msg) {
+            msg = strchr(msg, ':') + 1;
+            while (*msg == ' ' || *msg == '"') msg++;
+            size_t i = 0;
+            while (*msg && *msg != '"' && i < buffer_size - 1) {
+                response_buffer[i++] = *msg++;
+            }
+            response_buffer[i] = '\0';
+        } else {
+            snprintf(response_buffer, buffer_size, "Error: API error");
+        }
         return -1;
     }
     
-    // Extract content from JSON
     if (json_extract_content(body, response_buffer, buffer_size) < 0) {
         snprintf(response_buffer, buffer_size, "Error: Could not parse response");
         return -1;
