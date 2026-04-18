@@ -1,61 +1,25 @@
 #include "../include/openrouter.h"
 #include "../include/config.h"
-#include <sys/socket.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <curl/curl.h>
 
-int http_post_json(const char *hostname, const char *path, const char *api_key,
-                    const char *json_body, char *response, size_t max_len) {
-    int sock;
-    struct hostent *server;
-    struct sockaddr_in addr;
+struct response_data {
+    char *buffer;
+    size_t size;
+};
+
+static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    struct response_data *mem = (struct response_data *)userp;
     
-    server = gethostbyname(hostname);
-    if (!server) return -1;
+    char *ptr = realloc(mem->buffer, mem->size + realsize + 1);
+    if (!ptr) return 0;
     
-    sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return -1;
+    mem->buffer = ptr;
+    memcpy(&(mem->buffer[mem->size]), contents, realsize);
+    mem->size += realsize;
+    mem->buffer[mem->size] = 0;
     
-    addr.sin_family = AF_INET;
-    memcpy(&addr.sin_addr.s_addr, server->h_addr, server->h_length);
-    addr.sin_port = htons(80);
-    
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(sock);
-        return -1;
-    }
-    
-    char request[MAX_BUFFER];
-    char auth_header[512];
-    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
-    
-    int req_len = snprintf(request, sizeof(request),
-        "POST %s HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "Content-Type: application/json\r\n"
-        "%s\r\n"
-        "HTTP-Referer: %s\r\n"
-        "X-Title: %s\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "%s",
-        path, hostname, auth_header, HTTP_REFERER, APP_TITLE, strlen(json_body), json_body
-    );
-    
-    send(sock, request, req_len, 0);
-    
-    memset(response, 0, max_len);
-    int total = 0, bytes;
-    while ((bytes = recv(sock, response + total, max_len - total - 1, 0)) > 0) {
-        total += bytes;
-        if (total >= (int)max_len - 1) break;
-    }
-    response[total] = '\0';
-    
-    close(sock);
-    return 0;
+    return realsize;
 }
 
 void json_escape(char *dest, const char *src, size_t max_len) {
@@ -75,28 +39,29 @@ void json_escape(char *dest, const char *src, size_t max_len) {
 }
 
 int json_extract_content(const char *json, char *content, size_t max_len) {
-    const char *content_start = strstr(json, "\"content\"");
-    if (!content_start) return -1;
+    const char *p = strstr(json, "\"content\"");
+    if (!p) return -1;
     
-    content_start = strchr(content_start, ':');
-    if (!content_start) return -1;
-    content_start++;
+    p = strchr(p, ':');
+    if (!p) return -1;
+    p++;
     
-    while (*content_start && (*content_start == ' ' || *content_start == '"')) content_start++;
+    while (*p && (*p == ' ' || *p == '"')) p++;
     
     size_t i = 0;
-    while (*content_start && *content_start != '"' && i < max_len - 1) {
-        if (*content_start == '\\') {
-            content_start++;
-            if (*content_start == 'n') content[i++] = '\n';
-            else if (*content_start == 't') content[i++] = '\t';
-            else if (*content_start == 'r') content[i++] = '\r';
-            else if (*content_start == '"') content[i++] = '"';
-            else if (*content_start == '\\') content[i++] = '\\';
+    while (*p && *p != '"' && i < max_len - 1) {
+        if (*p == '\\') {
+            p++;
+            if (*p == 'n') content[i++] = '\n';
+            else if (*p == 't') content[i++] = '\t';
+            else if (*p == 'r') content[i++] = '\r';
+            else if (*p == '"') content[i++] = '"';
+            else if (*p == '\\') content[i++] = '\\';
+            else { content[i++] = '\\'; content[i++] = *p; }
         } else {
-            content[i++] = *content_start;
+            content[i++] = *p;
         }
-        content_start++;
+        p++;
     }
     content[i] = '\0';
     return i;
@@ -105,6 +70,11 @@ int json_extract_content(const char *json, char *content, size_t max_len) {
 int openrouter_chat_completion(const char *api_key, const char *model,
                                const char *user_message, char *response_buffer,
                                size_t buffer_size) {
+    CURL *curl;
+    CURLcode res;
+    struct response_data response_data = {0};
+    
+    // Build JSON request
     static char json_body[MAX_BUFFER];
     char escaped_message[MAX_BUFFER * 2];
     
@@ -121,30 +91,49 @@ int openrouter_chat_completion(const char *api_key, const char *model,
         model, escaped_message
     );
     
-    char raw_response[MAX_BUFFER * 2];
-    int result = http_post_json(
-        "openrouter.ai",
-        "/api/v1/chat/completions",
-        api_key,
-        json_body,
-        raw_response,
-        sizeof(raw_response)
-    );
+    // Initialize curl
+    curl_global_init(CURL_GLOBAL_ALL);
+    curl = curl_easy_init();
     
-    if (result != 0) {
-        snprintf(response_buffer, buffer_size, "Error: Failed to connect to OpenRouter API");
+    if (!curl) {
+        snprintf(response_buffer, buffer_size, "Error: Failed to initialize CURL");
         return -1;
     }
     
-    char *body = strstr(raw_response, "\r\n\r\n");
-    if (!body) {
-        snprintf(response_buffer, buffer_size, "Error: Invalid response from API");
+    // Set headers
+    struct curl_slist *headers = NULL;
+    char auth_header[512];
+    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
+    
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, auth_header);
+    headers = curl_slist_append(headers, "HTTP-Referer: https://termux-ai-chatbot.local");
+    headers = curl_slist_append(headers, "X-Title: Termux AI Chatbot");
+    
+    // Set curl options
+    curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/chat/completions");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_data);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    
+    // Perform request
+    res = curl_easy_perform(curl);
+    
+    if (res != CURLE_OK) {
+        snprintf(response_buffer, buffer_size, "Error: %s", curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
+        free(response_data.buffer);
         return -1;
     }
-    body += 4;
     
-    if (strstr(body, "\"error\"")) {
-        char *msg = strstr(body, "\"message\"");
+    // Check for API error
+    if (strstr(response_data.buffer, "\"error\"")) {
+        char *msg = strstr(response_data.buffer, "\"message\"");
         if (msg) {
             msg = strchr(msg, ':') + 1;
             while (*msg == ' ' || *msg == '"') msg++;
@@ -154,15 +143,45 @@ int openrouter_chat_completion(const char *api_key, const char *model,
             }
             response_buffer[i] = '\0';
         } else {
-            snprintf(response_buffer, buffer_size, "Error: API error");
+            snprintf(response_buffer, buffer_size, "Error: API returned an error");
         }
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
+        free(response_data.buffer);
         return -1;
     }
     
-    if (json_extract_content(body, response_buffer, buffer_size) < 0) {
-        snprintf(response_buffer, buffer_size, "Error: Could not parse response");
-        return -1;
+    // Extract content
+    if (json_extract_content(response_data.buffer, response_buffer, buffer_size) < 0) {
+        // Try alternative parsing: find first "content" after "choices"
+        char *choices = strstr(response_data.buffer, "\"choices\"");
+        if (choices) {
+            char *content = strstr(choices, "\"content\"");
+            if (content) {
+                content = strchr(content, ':') + 1;
+                while (*content == ' ' || *content == '"') content++;
+                size_t i = 0;
+                while (*content && *content != '"' && i < buffer_size - 1) {
+                    if (*content == '\\') {
+                        content++;
+                        if (*content == 'n') response_buffer[i++] = '\n';
+                        else if (*content == 't') response_buffer[i++] = '\t';
+                        else if (*content == 'r') response_buffer[i++] = '\r';
+                        else if (*content == '"') response_buffer[i++] = '"';
+                        else { response_buffer[i++] = '\\'; response_buffer[i++] = *content; }
+                    } else {
+                        response_buffer[i++] = *content;
+                    }
+                    content++;
+                }
+                response_buffer[i] = '\0';
+            }
+        }
     }
+    
+    curl_easy_cleanup(curl);
+    curl_slist_free_all(headers);
+    free(response_data.buffer);
     
     return 0;
 }
